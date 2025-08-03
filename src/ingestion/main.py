@@ -1,11 +1,16 @@
+"""Módulo responsável pela ingestão de dados brutos da FakeStore API."""
+
 import os
+from typing import List, Dict, Any
+
 import requests
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
-from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import (
-    StructType, StructField,
-    IntegerType, StringType, DoubleType
+    StructType,
+    StructField,
+    DoubleType,
+    IntegerType,
+    StringType,
 )
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://fakestoreapi.com")
@@ -13,27 +18,24 @@ PRODUCTS_ENDPOINT = os.environ.get("PRODUCTS_ENDPOINT", "/products")
 USERS_ENDPOINT = os.environ.get("USERS_ENDPOINT", "/users")
 
 
-def fetch_api_data(endpoint: str) -> list:
-    """Fetch JSON data from the given API endpoint."""
+def fetch_api_data(endpoint: str) -> List[Dict[str, Any]]:
+    """Busca dados JSON no endpoint informado."""
     response = requests.get(f"{API_BASE_URL}{endpoint}")
     response.raise_for_status()
     return response.json()
 
 
-def save_to_parquet(api: str, data: list, output_path: str, spark: SparkSession) -> None:
-    """Save list of dicts to a parquet file using Spark."""
+def save_to_parquet(api: str, data: List[Dict[str, Any]], output_path: str, spark: SparkSession) -> None:
+    """Salva lista de dicionários em um arquivo Parquet usando Spark."""
     if not data:
         return
 
     if api == "products":
-        # Exemplo de pré-conversão
         for item in data:
-            # garante que price e rating.rate são float
             item["price"] = float(item["price"])
-            # se rating estiver presente e for dict:
             if isinstance(item.get("rating"), dict):
                 item["rating"]["rate"] = float(item["rating"]["rate"])
-                # rating["count"] já é int, ok para IntegerType
+
         schema = StructType([
             StructField("id", IntegerType(), True),
             StructField("title", StringType(), True),
@@ -43,21 +45,21 @@ def save_to_parquet(api: str, data: list, output_path: str, spark: SparkSession)
             StructField("image", StringType(), True),
             StructField("rating", StructType([
                 StructField("rate", DoubleType(), True),
-                StructField("count", IntegerType(), True)
-            ]), True)
+                StructField("count", IntegerType(), True),
+            ]), True),
         ])
-        # 1) Cria DF a partir da lista Python
         df_final = spark.createDataFrame(data, schema=schema)
-
     elif api == "users":
-        # Para usuários, filtra só os campos desejados
         df_final = spark.createDataFrame(
-            [{"id": item["id"], "name": item["name"], "email": item["email"]} 
-             for item in data]
+            [
+                {"id": item["id"], "name": item["name"], "email": item["email"]}
+                for item in data
+            ]
         )
+    else:
+        raise ValueError(f"API desconhecida: {api}")
 
-        # 5) Escreve o DataFrame correto
-        df_final.write.mode("overwrite").parquet(output_path)
+    df_final.write.mode("overwrite").parquet(output_path)
 
 
 
