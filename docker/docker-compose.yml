@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: pg_bronze
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: engenharia-dados
+    ports:
+      - "5432:5432"
+    volumes:
+      # Monta o diretório com scripts de init
+      - ./initdb:/docker-entrypoint-initdb.d
+      # Monta um volume local para persistir dados
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
