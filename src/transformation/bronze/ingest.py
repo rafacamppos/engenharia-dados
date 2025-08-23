@@ -56,20 +56,19 @@ df_bronze = df_bronze.dropDuplicates(["id"])
  .partitionBy("category")  # opcional
  .save(BRONZE_PATH))
 
+spark.sql("CREATE DATABASE IF NOT EXISTS default")
+
 # (opcional) registrar tabela por LOCATION
-spark.sql("DROP TABLE IF EXISTS default.bronze_products")
 spark.sql(f"""
-  CREATE TABLE default.bronze_products
+  CREATE TABLE IF NOT EXISTS default.bronze_products
   USING DELTA
   LOCATION '{BRONZE_PATH}'
 """)
 spark.sql("SHOW TABLES").show()
 print("Existe _delta_log?:", os.path.exists(os.path.join(BRONZE_PATH, "_delta_log")))
+
 df = spark.read.format("delta").load(BRONZE_PATH).show()
 df_bronze.createOrReplaceTempView("bronze_products")
 spark.sql("""
     SELECT * FROM bronze_products """).show(truncate=False)
-#spark.sql(f""" SELECT * FROM default.bronze_products USING DELTA LOCATION '{BRONZE_PATH}'""").show()
-
-
 spark.stop()
