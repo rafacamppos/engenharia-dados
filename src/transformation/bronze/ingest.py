@@ -6,9 +6,11 @@ from pyspark.sql.types import (StructType, StructField, IntegerType, StringType,
                                DoubleType, StructType as ST, StructField as SF, IntegerType as IT)
 from pyspark.sql.functions import input_file_name, current_timestamp, col
 
-PATH_RAW_FILE = "data/raw/fakestore/products/2025-08-16/12086be9f04649509033feae8af0699a/part-ba441b58257a4a829c39d06be94ff4af-00001.jsonl.gz"
+PATH_PRODUCTS_RAW_FILE = "data/raw/fakestore/products/part-a993305996e04052a5791fe3a3711a8c-00001.jsonl.gz"
 
-BRONZE_PATH = "data/bronze/fakestore/products"
+PATH_USERS_RAW_FILE = "data/raw/fakestore/users/part-928fb9b1183943ae988a112411745c38-00001.jsonl.gz"
+BRONZE_PRODUCTS_PATH = "data/bronze/fakestore/products"
+BRONZE_USERS_PATH = "data/bronze/fakestore/users"
 
 
 builder = (
@@ -36,25 +38,66 @@ products_schema = StructType([
     ]), True),
 ])
 
-# ---- read RAW → cast & meta ----
-df_raw = spark.read.schema(products_schema).json(PATH_RAW_FILE)
+users_schema = StructType([
+    StructField("id", IntegerType(), True),
+    StructField("email", StringType(), True),
+    StructField("username", StringType(), True),
+    StructField("password", StringType(), True),
+    StructField("phone", StringType(), True),
+    StructField("__v", IntegerType(), True),
 
-df_bronze = (
-    df_raw
+    StructField("name", StructType([
+        StructField("firstname", StringType(), True),
+        StructField("lastname", StringType(), True),
+    ]), True),
+
+    StructField("address", StructType([
+        StructField("city", StringType(), True),
+        StructField("street", StringType(), True),
+        StructField("number", IntegerType(), True),
+        StructField("zipcode", StringType(), True),
+        StructField("geolocation", StructType([
+            StructField("lat", StringType(), True),
+            StructField("long", StringType(), True),
+        ]), True),
+    ]), True),
+])
+
+# ---- read RAW → cast & meta ----
+df_products_raw = spark.read.schema(products_schema).json(PATH_PRODUCTS_RAW_FILE)
+df_users_raw = spark.read.schema(users_schema).json(PATH_USERS_RAW_FILE)
+
+df_products_bronze = (
+    df_products_raw
+    .withColumn("file_origin", input_file_name())
+    .withColumn("ingestion_ts", current_timestamp())
+)
+
+df_users_bronze = (
+    df_users_raw
     .withColumn("file_origin", input_file_name())
     .withColumn("ingestion_ts", current_timestamp())
 )
 
 # (opcional) dedup por id
-df_bronze = df_bronze.dropDuplicates(["id"])
+df_products_bronze = df_products_bronze.dropDuplicates(["id"])
+df_users_bronze = df_users_bronze.dropDuplicates(["id"])
 
 # ---- write Delta (append) ----
-(df_bronze
+(df_products_bronze
  .write
  .format("delta")
+ .option("mergeSchema", "true")
  .mode("append")
  .partitionBy("category")  # opcional
- .save(BRONZE_PATH))
+ .save(BRONZE_PRODUCTS_PATH))
+
+(df_users_bronze
+ .write
+ .format("delta")
+ .option("mergeSchema", "true")
+ .mode("append")
+ .save(BRONZE_USERS_PATH))
 
 spark.sql("CREATE DATABASE IF NOT EXISTS default")
 
@@ -62,13 +105,23 @@ spark.sql("CREATE DATABASE IF NOT EXISTS default")
 spark.sql(f"""
   CREATE TABLE IF NOT EXISTS default.bronze_products
   USING DELTA
-  LOCATION '{BRONZE_PATH}'
+  LOCATION '{BRONZE_PRODUCTS_PATH}'
 """)
-spark.sql("SHOW TABLES").show()
-print("Existe _delta_log?:", os.path.exists(os.path.join(BRONZE_PATH, "_delta_log")))
 
-df = spark.read.format("delta").load(BRONZE_PATH).show()
-df_bronze.createOrReplaceTempView("bronze_products")
-spark.sql("""
-    SELECT * FROM bronze_products """).show(truncate=False)
+spark.sql(f"""
+  CREATE TABLE IF NOT EXISTS default.bronze_users
+  USING DELTA
+  LOCATION '{BRONZE_USERS_PATH}'
+""")
+
+#spark.sql("SHOW TABLES").show()
+#print("Existe _delta_log?:", os.path.exists(os.path.join(BRONZE_PRODUCTS_PATH, "_delta_log")))
+
+#spark.read.format("delta").load(BRONZE_PRODUCTS_PATH).show()
+#spark.read.format("delta").load(BRONZE_USERS_PATH).show()
+
+df_products_bronze.createOrReplaceTempView("bronze_products")
+df_users_bronze.createOrReplaceTempView("bronze_users")
+spark.sql(""" SELECT * FROM bronze_products """).show(truncate=False)
+spark.sql(""" SELECT * FROM bronze_users """).show(truncate=False)
 spark.stop()

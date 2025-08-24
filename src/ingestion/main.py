@@ -252,6 +252,7 @@ def main():
     # Busca dados da API
     products = fetch_api_data(PRODUCTS_ENDPOINT)
     users    = fetch_api_data(USERS_ENDPOINT)
+    print(json.dumps(users, indent=4, ensure_ascii=False))
 
     batch_id = uuid.uuid4().hex
     data_atual = date.today().isoformat()
