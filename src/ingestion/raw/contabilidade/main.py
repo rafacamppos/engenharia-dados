@@ -1,36 +1,36 @@
-"""Módulo responsável pela ingestão de dados brutos da FakeStore API."""
+"""Módulo de ingestão e utilidades para persistência.
 
-import os
-from typing import List, Dict, Any, Tuple, Iterable, Union
+Boas práticas aplicadas:
+- Tipagem explícita e docstrings consistentes.
+- Separação de responsabilidades em funções pequenas e testáveis.
+- Escrita segura em caminho local e função utilitária para Parquet.
+"""
+
+from __future__ import annotations
+
 import io
 import gzip
 import json
-
-import requests
-from pyspark.sql import SparkSession
-import datetime
+import os
 import uuid
 from datetime import date
-from pyspark.sql.types import (
-    StructType,
-    StructField,
-    DoubleType,
-    IntegerType,
-    StringType,
-)
+from typing import Any, Dict, Iterable, List, Tuple
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://fakestoreapi.com")
-PRODUCTS_ENDPOINT = os.environ.get("PRODUCTS_ENDPOINT", "/products")
-USERS_ENDPOINT = os.environ.get("USERS_ENDPOINT", "/users")
 
-BASE_RAW_PATH = os.getenv("BASE_RAW_PATH", "data/raw")   # Ex.: "data/raw" ou "s3a://raw"
-SOURCE_NAME   = os.getenv("SOURCE_NAME", "fakestore")
+from pyspark.sql import DataFrame, SparkSession
+import pandas as pd
+
+
+
+# Ex.: "data/raw" ou "s3a://raw"
+BASE_RAW_PATH = os.getenv("BASE_RAW_PATH", "data/raw")
+SOURCE_NAME = os.getenv("SOURCE_NAME", "contabilidade")
 MAX_LINES_PER_FILE = int(os.getenv("MAX_LINES_PER_FILE", "20000"))
 
-# Config de acesso S3/MinIO
+# Config de acesso S3/MinIO (não utilizado no momento para escrita, mantido para futura integração)
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "")
-AWS_ACCESS  = os.getenv("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET  = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+AWS_ACCESS = os.getenv("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 # ============================================================
 # FUNÇÕES AUXILIARES
@@ -82,7 +82,7 @@ def jsonl_gz_bytes(rows: Iterable[Dict[str, Any]]) -> Tuple[bytes, int]:
     return buf.getvalue(), count
 
 
-def chunk_by_lines(data: List[Dict[str, Any]], max_lines: int):
+def chunk_by_lines(data: Sequence[Dict[Any, Any]], max_lines: int) -> Iterable[Sequence[Dict[Any, Any]]]:
     """
     Divide a lista de registros em chunks menores com até `max_lines` linhas cada.
     Usado para evitar arquivos muito grandes na RAW.
@@ -117,32 +117,11 @@ def write_bytes(dest_path: str, blob: bytes, spark: SparkSession) -> None:
     with open(tmp_file, "wb") as f:
         f.write(blob)
 
-    # Usa o FS Hadoop para copiar para o destino s3a://
-    #sc = spark.sparkContext
-    #jvm = sc._jvm
-    #conf = sc._jsc.hadoopConfiguration()
-    #fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(dest_path), conf)
-    #src = jvm.org.apache.hadoop.fs.Path(f"file://{tmp_file}")
-    #dst = jvm.org.apache.hadoop.fs.Path(dest_path)
-    #fs.copyFromLocalFile(False, True, src, dst)
-
-    #os.remove(tmp_file)
+    # Integração S3 via Hadoop FS pode ser reativada quando necessário.
+    # Mantido propositalmente desativado para reduzir acoplamento e facilitar testes locais.
 
 
-# ============================================================
-# FUNÇÕES DE INGESTÃO
-# ============================================================
 
-def fetch_api_data(endpoint: str) -> List[Dict[str, Any]]:
-    """
-    Busca dados JSON no endpoint informado.
-    Retorna uma lista de dicionários.
-    Caso a API retorne um único objeto, encapsula em lista.
-    """
-    r = requests.get(f"{API_BASE_URL}{endpoint}", timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    return data if isinstance(data, list) else [data]
 
 
 def _exists_and_nonempty_local(path: str) -> bool:
@@ -191,12 +170,13 @@ def _validate_saved_file(spark: SparkSession, path: str, max_preview: int = 3) -
     if not content_ok:
         raise RuntimeError(f"Conteúdo inválido (JSON) no arquivo: {path}")
 
+from typing import Sequence
+
 def save_entity_to_raw(
-    entity: str,
-    items: List[Dict[str, Any]],
+    items: Sequence[Dict[Any, Any]],
     spark: SparkSession,
     data_atual: str,
-    batch_id: str
+    batch_id: str,
 ) -> None:
     """
     Salva um conjunto de registros de uma entidade (products, users, etc.) na RAW:
@@ -208,7 +188,7 @@ def save_entity_to_raw(
     if not items:
         return
 
-    base_entity = join_path(BASE_RAW_PATH, SOURCE_NAME, entity, data_atual, batch_id)
+    base_entity = join_path(BASE_RAW_PATH, SOURCE_NAME, data_atual, batch_id)
     if not is_s3a(base_entity):
         ensure_local_dir(base_entity)
 
@@ -226,11 +206,34 @@ def save_entity_to_raw(
         # opcional: log
         print(f"✔ salvo e validado: {dest}")
 
+
+def save_to_parquet(entity: str, items: List[Dict[str, Any]], output_path: str, spark: SparkSession) -> str:
+    """Salva uma lista de dicionários como Parquet usando Spark.
+
+    - Cria um DataFrame a partir de `items` (inferencia de schema).
+    - Escreve em `output_path` no modo overwrite.
+    - Retorna o caminho de saída para conveniência/chaining.
+
+    Observações:
+    - O caminho Parquet é um diretório; o sufixo ``.parquet`` é opcional.
+    - Suporta campos aninhados (ex.: ``rating`` em products).
+    """
+    if not items:
+        # Cria um DF vazio com uma coluna dummy para materializar diretório vazio de forma consistente
+        # Porém, preferimos levantar erro para evitar outputs vazios silenciosos.
+        raise ValueError("'items' não pode ser vazio para escrita Parquet")
+
+    df: DataFrame = spark.createDataFrame(items)
+    # Boas práticas: padronizar colunas e evitar nomes com espaços, mas manteremos o input fiel aqui.
+    # Escrita idempotente no contexto de testes.
+    df.write.mode("overwrite").parquet(output_path)
+    return output_path
+
 # ============================================================
 # MAIN
 # ============================================================
 
-def main():
+def main() -> None:
     """
     Orquestra a ingestão RAW:
     - Configura Spark (com suporte a S3/MinIO se necessário).
@@ -239,32 +242,29 @@ def main():
     - Salva na camada RAW no formato NDJSON .jsonl.gz.
     """
     # Spark Session (necessária para escrita em s3a://)
-    builder = SparkSession.builder.appName("FakeStoreToRAW").config("spark.driver.memory", "2g")
-    if BASE_RAW_PATH.startswith("s3a://") and S3_ENDPOINT:
-        builder = (builder
-            .config("spark.hadoop.fs.s3a.endpoint", S3_ENDPOINT)
-            .config("spark.hadoop.fs.s3a.access.key", AWS_ACCESS)
-            .config("spark.hadoop.fs.s3a.secret.key", AWS_SECRET)
-            .config("spark.hadoop.fs.s3a.path.style.access", "true")
-            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false"))
+    builder = (
+        SparkSession.builder
+        .appName("ContabilidadeToRaw")
+        .config("spark.driver.memory", "2g")
+    )
+    
     spark = builder.getOrCreate()
 
     # Busca dados da API
-    products = fetch_api_data(PRODUCTS_ENDPOINT)
-    users    = fetch_api_data(USERS_ENDPOINT)
-    print(json.dumps(users, indent=4, ensure_ascii=False))
+    estabecimentos = pd.read_csv("resources/estabelecimentos_50k.csv").to_dict(orient="records")
 
+    
     batch_id = uuid.uuid4().hex
     data_atual = date.today().isoformat()
-    # Salva entidades
-    save_entity_to_raw("products", products, spark, data_atual, batch_id)
-    save_entity_to_raw("users",    users,    spark, data_atual, batch_id)
 
-    print("✅ RAW gravada em:", join_path(BASE_RAW_PATH, SOURCE_NAME, "products", data_atual, batch_id))
+    # Salva entidades
+    save_entity_to_raw(estabecimentos, spark, data_atual, batch_id)
+    
+
+    print("✅ RAW gravada em:", join_path(BASE_RAW_PATH, SOURCE_NAME, "contabilidade", data_atual, batch_id))
     spark.stop()
 
 
 if __name__ == "__main__":
     main()
-
 
