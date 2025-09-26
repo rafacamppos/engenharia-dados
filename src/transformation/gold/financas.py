@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 
+# Configura Spark + Delta e funcoes utilitarias usadas no processamento
 from delta import configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
+# Caminhos de entrada/saida resolvidos a partir do diretorio do projeto
 BASE_DIR = os.getcwd()
 INPUT_JSON = os.path.join(BASE_DIR, "resources", "financas.json")
 
@@ -17,6 +19,7 @@ P_VW_GASTOS_MENSAL = f"{GOLD_BASE_PATH}/vw_gastos_mensal"
 T_VW_RENDA_MENSAL = "gold.vw_financas_renda_mensal"
 T_VW_GASTOS_MENSAL = "gold.vw_financas_gastos_mensal"
 
+# Sessao Spark configurada com extensoes Delta para permitir leitura/escrita em Delta Lake
 spark = configure_spark_with_delta_pip(
     SparkSession.builder
     .appName("BuildGold_Financas")
@@ -24,6 +27,7 @@ spark = configure_spark_with_delta_pip(
     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
 ).getOrCreate()
 
+# Ordem cronologica fixa para garantir consistencia nos pivots mensais
 MESES_ORDENADOS = [
     "JANEIRO",
     "FEVEREIRO",
@@ -39,6 +43,7 @@ MESES_ORDENADOS = [
     "DEZEMBRO",
 ]
 
+# Mapa id -> nome do mes (sem acentuacao) usado para normalizar os dados de entrada
 MESES_MAP = F.create_map(
     F.lit(1), F.lit("JANEIRO"),
     F.lit(2), F.lit("FEVEREIRO"),
@@ -54,10 +59,17 @@ MESES_MAP = F.create_map(
     F.lit(12), F.lit("DEZEMBRO")
 )
 
+# Categorias consideradas receitas; todo o restante sera tratado como despesa
 ENTRADAS_CATEGORIAS = ["salario", "bonus", "pix recebido"]
 
 
 def build_pivot_table(df: DataFrame, *, months: list[str], total_label: str = "TOTAL") -> DataFrame:
+    """Transforma um dataframe transacional em uma tabela pivotada por mes.
+
+    - Mantem o grao (ano, categoria)
+    - Garante existencia das colunas de mes
+    - Calcula o total anual e adiciona a linha TOTAL
+    """
     pivot = (
         df.groupBy("ano", "categoria")
         .pivot("mes_nome", months)
@@ -100,15 +112,18 @@ def build_pivot_table(df: DataFrame, *, months: list[str], total_label: str = "T
 
 
 
+# Garante que o catalogo Delta esteja pronto para receber as tabelas ouro
 spark.sql("CREATE DATABASE IF NOT EXISTS gold")
 spark.sql("USE gold")
 
+# Leitura da planilha JSON (estrutura multi-line) com os lancamentos financeiros
 raw_financas = (
     spark.read
     .option("multiLine", True)
     .json(INPUT_JSON)
 )
 
+# Normalizacao das colunas: datas, valores monetarios e classificacao entrada/saida
 financas = (
     raw_financas
     .withColumnRenamed("DATA", "data_texto")
@@ -134,14 +149,17 @@ financas = (
     .select("ano", "mes", "mes_nome", "categoria", "valor", "tipo_movimento")
 )
 
+# Gera tabela agregada de receitas e salva em Delta/Metastore
 renda_entradas = financas.where(F.col("tipo_movimento") == "entrada")
 renda_mensal = build_pivot_table(renda_entradas, months=MESES_ORDENADOS, total_label="TOTAL")
 renda_mensal.write.format("delta").mode("overwrite").partitionBy("ano").save(P_VW_RENDA_MENSAL)
 spark.sql(f"CREATE TABLE IF NOT EXISTS {T_VW_RENDA_MENSAL} USING DELTA LOCATION '{P_VW_RENDA_MENSAL}'")
 
+# Gera a tabela agregada de despesas com a mesma estrutura
 gastos = financas.where(F.col("tipo_movimento") == "saida")
 gastos_mensal = build_pivot_table(gastos, months=MESES_ORDENADOS, total_label="TOTAL")
 gastos_mensal.write.format("delta").mode("overwrite").partitionBy("ano").save(P_VW_GASTOS_MENSAL)
 spark.sql(f"CREATE TABLE IF NOT EXISTS {T_VW_GASTOS_MENSAL} USING DELTA LOCATION '{P_VW_GASTOS_MENSAL}'")
 
+# Libera os recursos da sessao Spark
 spark.stop()

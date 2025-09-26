@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 
+# Ferramentas auxiliares para somatorios cumulativos usados nos graficos
 from itertools import accumulate
 
+# Spark + Delta serao acessados via SQL para leitura das views
 from delta import configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
 
@@ -19,6 +21,7 @@ except ImportError:  # pragma: no cover - ambiente sem matplotlib
     plt = None
     FuncFormatter = None
 
+# Caminhos utilizados para localizar as tabelas Delta e salvar os graficos
 BASE_DIR = os.getcwd()
 GOLD_DIR = os.path.join(BASE_DIR, "data", "gold", "financas")
 ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
@@ -26,6 +29,7 @@ GASTOS_CHART_PATH = os.path.join(ARTIFACTS_DIR, "gastos_evolucao_mensal_2025.png
 GASTOS_DONUT_PATH = os.path.join(ARTIFACTS_DIR, "gastos_donut_2025.png")
 RENDA_DONUT_PATH = os.path.join(ARTIFACTS_DIR, "renda_donut_2025.png")
 
+# Ordem cronologica usada nas consultas e legendas dos graficos
 MESES_ORDENADOS = [
     "JANEIRO",
     "FEVEREIRO",
@@ -41,6 +45,7 @@ MESES_ORDENADOS = [
     "DEZEMBRO",
 ]
 
+# Metadados das views: nome no catalogo e caminho Delta fisico
 VIEWS = {
     "renda": {
         "table": "gold.vw_financas_renda_mensal",
@@ -54,6 +59,7 @@ VIEWS = {
 
 
 def build_spark() -> SparkSession:
+    """Inicializa uma sessao Spark configurada para ler tabelas Delta."""
     builder = (
         SparkSession.builder
         .appName("ConsultaGold_Financas_Renda")
@@ -67,6 +73,7 @@ def build_spark() -> SparkSession:
 
 
 def ensure_table(spark: SparkSession, table: str, delta_path: str) -> None:
+    """Registra a tabela no catalogo Spark se ainda nao estiver disponivel."""
     if not os.path.exists(delta_path):
         raise FileNotFoundError(f"Delta path não encontrado: {delta_path}")
 
@@ -83,6 +90,7 @@ def ensure_table(spark: SparkSession, table: str, delta_path: str) -> None:
 
 
 def plot_gastos(spark: SparkSession, table: str, *, ano: int, output_path: str) -> None:
+    """Consulta gastos mensais via SQL e gera grafico de barras + linha acumulada."""
     if plt is None or FuncFormatter is None:
         print("Matplotlib não está disponível; gráfico de gastos não gerado.")
         return
@@ -192,6 +200,7 @@ def plot_donut(
     output_path: str,
     title: str,
 ) -> None:
+    """Consulta totais anuais por categoria e monta grafico de rosca estilizado."""
     if plt is None:
         print("Matplotlib não está disponível; gráfico de pizza não gerado.")
         return
@@ -272,6 +281,7 @@ def plot_donut(
 
 
 def main() -> None:
+    """Executa as consultas SQL, mostra previas e gera os graficos solicitados."""
     spark = build_spark()
 
     try:
@@ -279,8 +289,10 @@ def main() -> None:
             table = cfg["table"]
             path = cfg["delta_path"]
 
+            # Cria a tabela no catalogo se necessario (sem reler todo o dataset)
             ensure_table(spark, table, path)
 
+            # Pre-visualiza os dados relevantes (gastos filtrados para 2025)
             where_clause = "WHERE ano = 2025" if nome == "gastos" else ""
             preview_sql = f"SELECT * FROM {table} {where_clause} ORDER BY ano, categoria LIMIT 20"
 
@@ -288,6 +300,7 @@ def main() -> None:
             spark.sql(preview_sql).show(20, truncate=False)
 
             if nome == "gastos":
+                # Grafico evolutivo mensal e pizza de distribuicao de gastos
                 plot_gastos(spark, table, ano=2025, output_path=GASTOS_CHART_PATH)
                 plot_donut(
                     spark,
@@ -298,6 +311,7 @@ def main() -> None:
                     title="Gastos",
                 )
             elif nome == "renda":
+                # Apenas donut para renda (mantem mesma estetica dos gastos)
                 plot_donut(
                     spark,
                     table,
