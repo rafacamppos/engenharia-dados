@@ -5,6 +5,8 @@ import os
 # Ferramentas auxiliares para somatorios cumulativos usados nos graficos
 from itertools import accumulate
 
+from typing import Sequence
+
 # Spark + Delta serao acessados via SQL para leitura das views
 from delta import configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
@@ -25,7 +27,7 @@ except ImportError:  # pragma: no cover - ambiente sem matplotlib
 BASE_DIR = os.getcwd()
 GOLD_DIR = os.path.join(BASE_DIR, "data", "gold", "financas")
 ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
-GASTOS_CHART_PATH = os.path.join(ARTIFACTS_DIR, "gastos_evolucao_mensal_2025.png")
+EVOLUCAO_CHART_PATH = os.path.join(ARTIFACTS_DIR, "evolucao_mensal_2025.png")
 GASTOS_DONUT_PATH = os.path.join(ARTIFACTS_DIR, "gastos_donut_2025.png")
 RENDA_DONUT_PATH = os.path.join(ARTIFACTS_DIR, "renda_donut_2025.png")
 
@@ -89,106 +91,108 @@ def ensure_table(spark: SparkSession, table: str, delta_path: str) -> None:
     )
 
 
-def plot_gastos(spark: SparkSession, table: str, *, ano: int, output_path: str) -> None:
-    """Consulta gastos mensais via SQL e gera grafico de barras + linha acumulada."""
-    if plt is None or FuncFormatter is None:
-        print("Matplotlib não está disponível; gráfico de gastos não gerado.")
-        return
-
-    monthly_sql = f"""
-        SELECT
-            {', '.join([f"COALESCE(SUM(`{mes}`), 0) AS `{mes}`" for mes in MESES_ORDENADOS])}
-        FROM {table}
-        WHERE ano = {ano} AND categoria = 'TOTAL'
-    """
-
-    row = spark.sql(monthly_sql).first()
+def _fetch_monthly_totals(spark: SparkSession, table: str, ano: int) -> Sequence[float]:
+    cols = ', '.join([f"COALESCE(SUM(`{mes}`), 0) AS `{mes}`" for mes in MESES_ORDENADOS])
+    query_total = f"SELECT {cols} FROM {table} WHERE ano = {ano} AND categoria = 'TOTAL'"
+    row = spark.sql(query_total).first()
 
     if row is None or all((row[mes] or 0) == 0 for mes in MESES_ORDENADOS):
-        fallback_sql = f"""
-            SELECT
-                {', '.join([f"COALESCE(SUM(`{mes}`), 0) AS `{mes}`" for mes in MESES_ORDENADOS])}
-            FROM {table}
-            WHERE ano = {ano} AND categoria <> 'TOTAL'
-        """
-        row = spark.sql(fallback_sql).first()
+        query_sum = f"SELECT {cols} FROM {table} WHERE ano = {ano} AND categoria <> 'TOTAL'"
+        row = spark.sql(query_sum).first()
 
     if row is None:
-        print(f"Nenhum dado de gastos encontrado para o ano {ano}.")
+        return [0.0 for _ in MESES_ORDENADOS]
+
+    return [float(row[mes] or 0.0) for mes in MESES_ORDENADOS]
+
+
+def plot_evolucao_mensal(spark: SparkSession, renda_table: str, gastos_table: str, *, ano: int, output_path: str) -> None:
+    """Gera grafico com barras de renda x gastos e linha do saldo acumulado."""
+    if plt is None or FuncFormatter is None:
+        print("Matplotlib não está disponível; gráfico de evolução não gerado.")
         return
 
-    monthly_values = [float((row[mes] or 0.0)) for mes in MESES_ORDENADOS]
+    renda_vals = _fetch_monthly_totals(spark, renda_table, ano)
+    gastos_vals = _fetch_monthly_totals(spark, gastos_table, ano)
 
-    cumulative = list(accumulate(monthly_values))
+    if all(v == 0 for v in renda_vals) and all(v == 0 for v in gastos_vals):
+        print(f"Sem dados de renda e gastos para {ano}; gráfico não gerado.")
+        return
+
+    saldo_mensal = [r - g for r, g in zip(renda_vals, gastos_vals)]
+    saldo_acumulado = list(accumulate(saldo_mensal))
+
     x_positions = list(range(len(MESES_ORDENADOS)))
+    bar_width = 0.35
 
-    max_value = max(monthly_values) if monthly_values else 0.0
-    bar_color = "#3B82F6"
-    line_color = "#16A34A"
+    max_val = max(renda_vals + gastos_vals) if renda_vals or gastos_vals else 0.0
 
     fig, ax_bar = plt.subplots(figsize=(13, 5), dpi=140)
     ax_bar.set_facecolor("#f5f7fb")
 
-    bars = ax_bar.bar(
-        x_positions,
-        monthly_values,
-        color=bar_color,
+    renda_positions = [x - bar_width / 2 for x in x_positions]
+    gastos_positions = [x + bar_width / 2 for x in x_positions]
+
+    ax_bar.bar(
+        renda_positions,
+        renda_vals,
+        width=bar_width,
+       color="#3B82F6",
         edgecolor="#1E3A8A",
+        linewidth=0.6,
+        alpha=0.9,
+        label="Renda do mês",
+    )
+
+    ax_bar.bar(
+        gastos_positions,
+        gastos_vals,
+        width=bar_width,
+        color="#F97316",
+        edgecolor="#C2410C",
         linewidth=0.6,
         alpha=0.9,
         label="Gastos do mês",
     )
 
-    for bar in bars:
-        bar.set_linewidth(0)
-        bar.set_alpha(0.88)
-
     ax_bar.set_xticks(x_positions)
     ax_bar.set_xticklabels(MESES_ORDENADOS, rotation=40, ha="right")
     ax_bar.set_ylabel("Valor (R$)")
     ax_bar.set_xlabel("Mês")
-    ax_bar.set_title(f"Evolução Mensal de Gastos - {ano}", fontsize=14, pad=12)
-    ax_bar.yaxis.set_major_formatter(
-        FuncFormatter(lambda x, _: f"{x:,.0f}".replace(",", "."))
-    )
-    ax_bar.set_ylim(0, max_value * 1.25 if max_value else 1)
+    ax_bar.set_title(f"Evolução Mensal - {ano}", fontsize=14, pad=12)
+    ax_bar.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}".replace(",", ".")))
+    ax_bar.set_ylim(0, max_val * 1.25 if max_val else 1)
     ax_bar.grid(axis="y", linestyle="--", alpha=0.25)
 
+    saldo_color = "#15803D"
     ax_line = ax_bar.twinx()
     ax_line.plot(
         x_positions,
-        cumulative,
-        color=line_color,
+        saldo_acumulado,
+        color=saldo_color,
         marker="o",
         markersize=6,
-        linewidth=2.8,
-        label="Acumulado",
+        linewidth=2.6,
+        label="Saldo acumulado",
     )
-    ax_line.fill_between(
-        x_positions,
-        cumulative,
-        color=line_color,
-        alpha=0.18,
-    )
-    ax_line.set_ylabel("Acumulado (R$)")
-    ax_line.yaxis.set_major_formatter(
-        FuncFormatter(lambda x, _: f"{x:,.0f}".replace(",", "."))
-    )
+    ax_line.fill_between(x_positions, saldo_acumulado, color=saldo_color, alpha=0.18)
+    ax_line.set_ylabel("Saldo acumulado (R$)")
+    ax_line.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}".replace(",", ".")))
     ax_line.grid(False)
 
     for spine in ["top", "right"]:
         ax_bar.spines[spine].set_visible(False)
         ax_line.spines[spine].set_visible(False)
 
-    linhas, labels = ax_bar.get_legend_handles_labels()
-    linhas2, labels2 = ax_line.get_legend_handles_labels()
-    ax_bar.legend(linhas + linhas2, labels + labels2, loc="upper left", frameon=False)
+    handles_bar, labels_bar = ax_bar.get_legend_handles_labels()
+    handles_line, labels_line = ax_line.get_legend_handles_labels()
+    ax_bar.legend(handles_bar + handles_line, labels_bar + labels_line, loc="upper left", frameon=False)
 
     plt.tight_layout(pad=1.2)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"Gráfico de gastos salvo em: {output_path}")
+    print(f"Gráfico de evolução mensal salvo em: {output_path}")
 
 
 def plot_donut(
@@ -285,6 +289,9 @@ def main() -> None:
     spark = build_spark()
 
     try:
+        renda_table = VIEWS["renda"]["table"]
+        gastos_table = VIEWS["gastos"]["table"]
+
         for nome, cfg in VIEWS.items():
             table = cfg["table"]
             path = cfg["delta_path"]
@@ -300,8 +307,14 @@ def main() -> None:
             spark.sql(preview_sql).show(20, truncate=False)
 
             if nome == "gastos":
-                # Grafico evolutivo mensal e pizza de distribuicao de gastos
-                plot_gastos(spark, table, ano=2025, output_path=GASTOS_CHART_PATH)
+                # Grafico evolutivo mensal (renda x gastos) e pizza de gastos
+                plot_evolucao_mensal(
+                    spark,
+                    renda_table=renda_table,
+                    gastos_table=gastos_table,
+                    ano=2025,
+                    output_path=EVOLUCAO_CHART_PATH,
+                )
                 plot_donut(
                     spark,
                     table,

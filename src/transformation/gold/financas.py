@@ -10,7 +10,9 @@ from pyspark.sql import functions as F
 
 # Caminhos de entrada/saida resolvidos a partir do diretorio do projeto
 BASE_DIR = os.getcwd()
-INPUT_JSON = os.path.join(BASE_DIR, "resources", "financas.json")
+
+SILVER_RENDA_PATH = f"file://{BASE_DIR}/data/silver/financas/renda"
+SILVER_GASTOS_PATH = f"file://{BASE_DIR}/data/silver/financas/gastos"
 
 GOLD_BASE_PATH = f"file://{BASE_DIR}/data/gold/financas"
 P_VW_RENDA_MENSAL = f"{GOLD_BASE_PATH}/vw_renda_mensal"
@@ -58,10 +60,6 @@ MESES_MAP = F.create_map(
     F.lit(11), F.lit("NOVEMBRO"),
     F.lit(12), F.lit("DEZEMBRO")
 )
-
-# Categorias consideradas receitas; todo o restante sera tratado como despesa
-ENTRADAS_CATEGORIAS = ["salario", "bonus", "pix recebido"]
-
 
 def build_pivot_table(df: DataFrame, *, months: list[str], total_label: str = "TOTAL") -> DataFrame:
     """Transforma um dataframe transacional em uma tabela pivotada por mes.
@@ -116,37 +114,21 @@ def build_pivot_table(df: DataFrame, *, months: list[str], total_label: str = "T
 spark.sql("CREATE DATABASE IF NOT EXISTS gold")
 spark.sql("USE gold")
 
-# Leitura da planilha JSON (estrutura multi-line) com os lancamentos financeiros
-raw_financas = (
-    spark.read
-    .option("multiLine", True)
-    .json(INPUT_JSON)
-)
+silver_renda = spark.read.format("delta").load(SILVER_RENDA_PATH)
+silver_gastos = spark.read.format("delta").load(SILVER_GASTOS_PATH)
 
-# Normalizacao das colunas: datas, valores monetarios e classificacao entrada/saida
 financas = (
-    raw_financas
-    .withColumnRenamed("DATA", "data_texto")
-    .withColumnRenamed("MÊS", "mes_nome_original")
-    .withColumnRenamed("CATEGORIA", "categoria")
-    .withColumnRenamed("DESCRICAO", "descricao")
-    .withColumnRenamed("VALOR", "valor_texto")
-    .withColumn("data", F.to_date("data_texto", "dd/MM/yyyy"))
+    silver_renda.unionByName(silver_gastos)
+    .withColumn("data", F.col("data").cast("date"))
+    .withColumn("valor", F.col("valor").cast("double"))
+    .withColumn("categoria", F.initcap(F.trim(F.col("categoria"))))
     .withColumn("descricao", F.trim(F.col("descricao")))
-    .withColumn("mes", F.month("data"))
-    .withColumn("mes_nome", F.element_at(MESES_MAP, F.col("mes")))
-    .withColumn("valor_limpo", F.regexp_replace(F.col("valor_texto"), r"[^0-9,-]", ""))
-    .withColumn("valor_limpo", F.regexp_replace(F.col("valor_limpo"), ",", "."))
-    .withColumn("valor", F.col("valor_limpo").cast("double"))
     .withColumn("ano", F.year("data"))
-    .withColumn(
-        "tipo_movimento",
-        F.when(F.lower(F.col("categoria")).isin(ENTRADAS_CATEGORIAS), F.lit("entrada"))
-        .otherwise(F.lit("saida"))
-    )
+    .withColumn("mes_num", F.month("data"))
+    .withColumn("mes_nome", F.element_at(MESES_MAP, F.col("mes_num")))
     .filter(F.col("data").isNotNull() & F.col("valor").isNotNull())
-    .dropDuplicates(["data", "categoria", "descricao", "valor"])
-    .select("ano", "mes", "mes_nome", "categoria", "valor", "tipo_movimento")
+    .dropDuplicates(["data", "categoria", "descricao", "valor", "tipo_movimento"])
+    .select("ano", "mes_num", "mes_nome", "categoria", "descricao", "valor", "tipo_movimento")
 )
 
 # Gera tabela agregada de receitas e salva em Delta/Metastore

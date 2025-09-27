@@ -177,6 +177,7 @@ def save_entity_to_raw(
     spark: SparkSession,
     data_atual: str,
     batch_id: str,
+    SOURCE_NAME: str,
 ) -> None:
     """
     Salva um conjunto de registros de uma entidade (products, users, etc.) na RAW:
@@ -258,7 +259,7 @@ def main() -> None:
     data_atual = date.today().isoformat()
 
     # Salva entidades
-    save_entity_to_raw(estabecimentos, spark, data_atual, batch_id)
+    save_entity_to_raw(estabecimentos, spark, data_atual, batch_id, SOURCE_NAME)
     
 
     print("✅ RAW gravada em:", join_path(BASE_RAW_PATH, SOURCE_NAME, "contabilidade", data_atual, batch_id))
